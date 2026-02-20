@@ -126,6 +126,13 @@ func Provider() *schema.Provider {
 				Optional: true,
 				Default:  300,
 			},
+
+			"enabled": {
+				Type:        schema.TypeBool,
+				Optional:    true,
+				Default:     true,
+				Description: "When false, the provider will not attempt to connect to the MySQL server. Useful when the provider is configured in a module but not needed (e.g., PostgreSQL-only clusters).",
+			},
 		},
 
 		DataSourcesMap: map[string]*schema.Resource{
@@ -148,6 +155,10 @@ func Provider() *schema.Provider {
 }
 
 func providerConfigure(d *schema.ResourceData) (interface{}, error) {
+
+	if enabled, ok := d.GetOk("enabled"); ok && !enabled.(bool) {
+		return &MySQLConfiguration{}, nil
+	}
 
 	var endpoint = d.Get("endpoint").(string)
 	var conn_params = make(map[string]string)
