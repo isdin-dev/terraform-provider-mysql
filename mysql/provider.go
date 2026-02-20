@@ -156,7 +156,7 @@ func Provider() *schema.Provider {
 
 func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 
-	if enabled, ok := d.GetOk("enabled"); ok && !enabled.(bool) {
+	if !d.Get("enabled").(bool) {
 		return &MySQLConfiguration{}, nil
 	}
 
