@@ -94,7 +94,9 @@ func CreateUser(d *schema.ResourceData, meta interface{}) error {
 			authStm = " IDENTIFIED WITH " + auth
 		}
 	}
-	if v, ok := d.GetOk("auth_string_hashed"); ok {
+	// For non-AWSAuthenticationPlugin plugins, append AS 'hash' from auth_string_hashed.
+	// AWSAuthenticationPlugin already includes 'as RDS' from the special case above.
+	if v, ok := d.GetOk("auth_string_hashed"); ok && auth != "AWSAuthenticationPlugin" {
 		hashed := v.(string)
 		if hashed != "" {
 			authStm = fmt.Sprintf("%s AS '%s'", authStm, hashed)
@@ -124,7 +126,9 @@ func CreateUser(d *schema.ResourceData, meta interface{}) error {
 
 	requiredVersion, _ := version.NewVersion("5.7.0")
 
-	if meta.(*MySQLConfiguration).Version.GreaterThan(requiredVersion) && d.Get("tls_option").(string) != "" {
+	// Skip REQUIRE clause for AWSAuthenticationPlugin - Aurora MySQL does not support
+	// REQUIRE with AWSAuthenticationPlugin AS 'RDS' (causes SQL syntax error 1064).
+	if auth != "AWSAuthenticationPlugin" && meta.(*MySQLConfiguration).Version.GreaterThan(requiredVersion) && d.Get("tls_option").(string) != "" {
 		stmtSQL += fmt.Sprintf(" REQUIRE %s", d.Get("tls_option").(string))
 	}
 
@@ -164,13 +168,26 @@ func UpdateUser(d *schema.ResourceData, meta interface{}) error {
 
 			authString := ""
 			if d.Get("auth_string_hashed").(string) != "" {
-				authString = fmt.Sprintf("IDENTIFIED WITH %s AS '%s'", d.Get("auth_plugin"), d.Get("auth_string_hashed"))
+				if auth == "AWSAuthenticationPlugin" {
+					authString = "IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"
+				} else {
+					authString = fmt.Sprintf("IDENTIFIED WITH %s AS '%s'", d.Get("auth_plugin"), d.Get("auth_string_hashed"))
+				}
 			}
-			stmtSQL = fmt.Sprintf("ALTER USER '%s'@'%s' %s  REQUIRE %s",
-				d.Get("user").(string),
-				d.Get("host").(string),
-				authString,
-				d.Get("tls_option").(string))
+
+			// Skip REQUIRE clause for AWSAuthenticationPlugin - Aurora MySQL does not support it.
+			if auth == "AWSAuthenticationPlugin" {
+				stmtSQL = fmt.Sprintf("ALTER USER '%s'@'%s' %s",
+					d.Get("user").(string),
+					d.Get("host").(string),
+					authString)
+			} else {
+				stmtSQL = fmt.Sprintf("ALTER USER '%s'@'%s' %s  REQUIRE %s",
+					d.Get("user").(string),
+					d.Get("host").(string),
+					authString,
+					d.Get("tls_option").(string))
+			}
 
 			log.Println("Executing query:", stmtSQL)
 			_, err := db.Exec(stmtSQL)
@@ -212,10 +229,10 @@ func UpdateUser(d *schema.ResourceData, meta interface{}) error {
 	if d.HasChange("tls_option") && mysqlConf.Version.GreaterThan(requiredVersion) {
 		var stmtSQL string
 
-		stmtSQL = fmt.Sprintf("ALTER USER '%s'@'%s'  REQUIRE %s",
+		stmtSQL = fmt.Sprintf("ALTER USER '%s'@'%s' REQUIRE %s",
 			d.Get("user").(string),
 			d.Get("host").(string),
-			fmt.Sprintf(" REQUIRE %s", d.Get("tls_option").(string)))
+			d.Get("tls_option").(string))
 
 		log.Println("Executing query:", stmtSQL)
 		_, err := db.Exec(stmtSQL)
@@ -248,13 +265,16 @@ func ReadUser(d *schema.ResourceData, meta interface{}) error {
 		// CREATE USER 'some_app'@'%' IDENTIFIED WITH 'mysql_native_password' AS '*0something' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK
 		// CREATE USER `jdoe-tf-test-47`@`example.com` IDENTIFIED WITH 'caching_sha2_password' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
 		// CREATE USER `jdoe`@`example.com` IDENTIFIED WITH 'caching_sha2_password' AS '$A$005$i`xay#fG/\' TrbkNA82' REQUIRE NONE PASSWORD
-		re := regexp.MustCompile("^CREATE USER ['`]([^'`]*)['`]@['`]([^'`]*)['`] IDENTIFIED WITH ['`]([^'`]*)['`] (?:AS '((?:.*?[^\\\\])?)' )?REQUIRE ([^ ]*)")
+		// CREATE USER 'iam_user'@'%' IDENTIFIED WITH 'AWSAuthenticationPlugin' AS 'RDS' PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK (no REQUIRE clause)
+		re := regexp.MustCompile("^CREATE USER ['`]([^'`]*)['`]@['`]([^'`]*)['`] IDENTIFIED WITH ['`]([^'`]*)['`] (?:AS '((?:.*?[^\\\\])?)' )?(?:REQUIRE ([^ ]*))?")
 		if m := re.FindStringSubmatch(createUserStmt); len(m) == 6 {
 			d.Set("user", m[1])
 			d.Set("host", m[2])
 			d.Set("auth_plugin", m[3])
 			d.Set("auth_string_hashed", m[4])
-			d.Set("tls_option", m[5])
+			if m[5] != "" {
+				d.Set("tls_option", m[5])
+			}
 			return nil
 		}
 
